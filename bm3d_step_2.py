@@ -2,17 +2,31 @@ from consts import *
 import numpy as np
 from scipy.fftpack import dct, idct
 
+def get_window_coord(img_size, ref_point):
+    ret_val = np.zeros((2,2), dtype = int)
+    ret_val[0, 0] = max(0, ref_point[0]+int((N_wien-window_size)/2)) # left-top x
+    ret_val[0, 1] = max(0, ref_point[1]+int((N_wien-window_size)/2)) # left-top y               
+    ret_val[1, 0] = ret_val[0, 0] + window_size # right-bottom x
+    ret_val[1, 1] = ret_val[0, 1] + window_size # right-bottom y             
+    if ret_val[1, 0] >= img_size[0]:
+        ret_val[1, 0] = img_size[0] - 1
+        ret_val[0, 0] = ret_val[1, 0] - window_size
+    if ret_val[1, 1] >= img_size[1]:
+        ret_val[1, 1] = img_size[1] - 1
+        ret_val[0, 1] = ret_val[1, 1] - window_size
+    return ret_val
+
 def get_overall_dct(img):
-    overall_dct = np.zeros((img.shape[0]-N_hard, img.shape[1]-N_hard, N_hard, N_hard),dtype = float)
+    overall_dct = np.zeros((img.shape[0]-N_wien, img.shape[1]-N_wien, N_wien, N_wien),dtype = float)
     for i in range(overall_dct.shape[0]):
         for j in range(overall_dct.shape[1]):
-            target_block = img[i:i+N_hard, j:j+N_hard]
+            target_block = img[i:i+N_wien, j:j+N_wien]
             overall_dct[i, j, :, :] = dct2D(target_block.astype(np.float64))
             
     return overall_dct
 
-def grouping(x_R, basic, basic_dct, noisy, noisy_dct):
-    height = (basic.shape[0] - N_wien + 1) ** 2
+def grouping(x_R, basic, basic_dct, noisy_dct):
+    height = (window_size - N_wien + 1) ** 2
     
     block_pos = np.zeros((height, 2), dtype = int)
     block_group_basic = np.zeros((height, N_wien, N_wien), dtype = int)
@@ -20,16 +34,20 @@ def grouping(x_R, basic, basic_dct, noisy, noisy_dct):
 
     dist = np.zeros(height, dtype=float)
     cnt = 0
+    window_coord = get_window_coord(basic.shape, x_R)
+    ref_block = basic[x_R[0]:x_R[0]+N_wien, x_R[1]:x_R[1]+N_wien].astype(np.float64)
 
-    ref_block = basic[x_R[0]:x_R[0]+N_wien, x_R[1]:x_R[1]+N_wien]
-
-    for i in range(basic.shape[0] - N_wien):
-        for j in range(basic.shape[1] - N_wien):
-            target_pos = [i, j]
-            target_block = basic[target_pos[0]:target_pos[0]+N_wien, target_pos[1]:target_pos[1]+N_wien]
+    size = window_size - N_wien + 1
+    for i in range(size):
+        for j in range(size):
+            target_pos = [window_coord[0, 0]+i, window_coord[0, 1]+j]
+            target_block = basic[target_pos[0]:target_pos[0]+N_wien, target_pos[1]:target_pos[1]+N_wien].astype(np.float64)
+            # print(f'{target_pos[0]}:{target_pos[0]+N_wien}, {target_pos[1]}:{target_pos[1]+N_wien}')
+            # print(window_coord[0], end=', ')
+            # print(i, end=', ')
+            # print(j)
             d = calc_dist(ref_block, target_block)
             if d < tau_wien:
-                # print(target_block)
                 block_pos[cnt, :] = target_pos
                 dist[cnt] = d
                 cnt = cnt + 1
@@ -82,27 +100,32 @@ def filtering3d(block_group_basic, block_group_noisy):
         wiener_weight = 1.0
     return block_group_noisy, wiener_weight
 
-def aggregation(target_img, target_weight_basic, block_group, block_pos, wiener_weight):
-    
+def aggregation(target_img, target_weight_basic, block_group, block_pos, wiener_weight, final_kaiser):
+    wiener_weight = wiener_weight * final_kaiser
     for i in range(block_pos.shape[0]):
         target_img[block_pos[i, 0] : block_pos[i, 0] + block_group.shape[1], block_pos[i, 1] : block_pos[i, 1] + block_group.shape[2]] += wiener_weight * idct2D(block_group[i, :, :])
         target_weight_basic[block_pos[i, 0]:block_pos[i, 0]+block_group.shape[1], block_pos[i, 1]:block_pos[i, 1]+block_group.shape[2]] += wiener_weight
 
 def bm3d_step_2(noisy, basic):
+    kaiser_window = np.matrix(np.kaiser(N_wien, 2.0))
+    final_kaiser = np.array(kaiser_window.T * kaiser_window)
+
     step_2_result_img = np.zeros(noisy.shape, dtype=float)
     step_2_weight_basic = np.zeros(noisy.shape, dtype=float)
     basic_dct = get_overall_dct(basic)
     noisy_dct = get_overall_dct(noisy)
-    for i in range(int((noisy.shape[0] - N_hard)/speed_up)):
-        for j in range(int((noisy.shape[1] - N_hard)/speed_up)):
-            x = min(speed_up * i, noisy.shape[0] - N_hard - 1)
-            y = min(speed_up * j, noisy.shape[1] - N_hard - 1)
+    size = int((noisy.shape[0] - N_wien)/speed_up)+2
+    for i in range(size):
+        print(f'step 2 : {i}/{size}')
+        for j in range(size):
+            x = min(speed_up * i, noisy.shape[0] - N_wien - 1)
+            y = min(speed_up * j, noisy.shape[1] - N_wien - 1)
             x_R = [x, y]
-            print(x_R)
-            block_pos, block_group_basic, block_group_noisy = grouping(x_R, basic, basic_dct, noisy, noisy_dct)
+            # print(x_R)
+            block_pos, block_group_basic, block_group_noisy = grouping(x_R, basic, basic_dct, noisy_dct)
             block_group_noisy, wiener_weight = filtering3d(block_group_basic, block_group_noisy)
 
-            aggregation(step_2_result_img, step_2_weight_basic, block_group_noisy, block_pos, wiener_weight)
+            aggregation(step_2_result_img, step_2_weight_basic, block_group_noisy, block_pos, wiener_weight, final_kaiser)
     
     step_2_weight_basic = np.where(step_2_weight_basic == 0, 1, step_2_weight_basic)
     
